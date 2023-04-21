@@ -245,7 +245,7 @@ def validate_session_role(session):
         err_msg+= "missing required read role 'admin' for security domain 'all'"
         return (False, err_msg)
 
-def get_apic_session(fabric, resubscribe=False):
+def get_apic_session(fabric, resubscribe=False, masterSession=False):
     """ get_apic_session 
         based on current aci.settings for provided fabric name, connect to
         apic and return valid session object. If fail to connect to apic 
@@ -294,14 +294,21 @@ def get_apic_session(fabric, resubscribe=False):
         h = re.sub("[/]+$","", h)
 
         # create session object
-        logger.debug("creating session on %s@%s",aci.apic_username,h)
+        logger.debug("creating session on {}@{} masterSession:{}".format(aci.apic_username,
+                                                                         h,
+                                                                         masterSession))
         if apic_cert_mode:
-            session = Session(h, aci.apic_username, appcenter_user=True, 
-                cert_name=aci.apic_username, key=aci.apic_cert, resubscribe=resubscribe,
-                lifetime=aci.session_timeout,subscription_refresh_time=aci.subscription_refresh_time)
+            session = Session(h, aci.apic_username, appcenter_user=True,
+                              cert_name=aci.apic_username, key=aci.apic_cert,
+                              resubscribe=resubscribe,
+                              lifetime=aci.session_timeout,
+                              subscription_refresh_time=aci.subscription_refresh_time,
+                              masterSession=masterSession)
         else:
             session = Session(h, aci.apic_username, aci.apic_password, resubscribe=resubscribe,
-                lifetime=aci.session_timeout,subscription_refresh_time=aci.subscription_refresh_time)
+                              lifetime=aci.session_timeout,
+                              subscription_refresh_time=aci.subscription_refresh_time,
+                              masterSession=masterSession)
         try:
             if session.login(timeout=SESSION_LOGIN_TIMEOUT):
                 logger.debug("successfully connected on %s", h)
@@ -929,5 +936,3 @@ def clear_endpoint(fabric, pod, node, vnid, addr, addr_type="ip", vrf_name=""):
         if session is not None:
             logger.debug("clossing session")
             session.close()
-
-        

@@ -495,7 +495,10 @@ class eptSubscriber(object):
         init_str = "initializing"
         # first step is to get a valid apic session, bail out if unable to connect
         logger.debug("starting ept_subscriber session")
-        self.session = get_apic_session(self.fabric)
+        # The ept_subscriber session is started by the manager and is
+        # supposed to be a master session with the fabric given it
+        # contains the subscriptions
+        self.session = get_apic_session(self.fabric, masterSession=True)
         if self.session is None:
             logger.warn("failed to connect to fabric: %s", self.fabric.fabric)
             self.fabric.add_fabric_event("failed", "failed to connect to apic")

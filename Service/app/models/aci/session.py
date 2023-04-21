@@ -16,7 +16,6 @@ from OpenSSL.crypto import load_privatekey
 from OpenSSL.crypto import sign
 
 import base64
-import copy
 import json
 import logging
 import re
@@ -27,6 +26,9 @@ import threading
 import time
 import traceback
 import urllib3
+import sys
+import pickle
+import os
 
 # module level logging
 logger = logging.getLogger(__name__)
@@ -61,7 +63,7 @@ class Session(object):
 
     def __init__(self, url, uid, pwd=None, cert_name=None, key=None, verify_ssl=False,
                  appcenter_user=False, proxies=None, resubscribe=True, graceful=True, lifetime=0,
-                 subscription_refresh_time=60):
+                 subscription_refresh_time=60, masterSession=False):
         """
             url (str)               apic url such as https://1.2.3.4
             uid (str)               apic username or certificate name 
@@ -91,6 +93,9 @@ class Session(object):
                                     in 4.0 and above. Caller should verify APIC/nodes are running
                                     a supported version of code before extended the subscription
                                     refresh time to custom value.
+             masterSession (bool)  This parameter indicate that the session can actually login on the
+                                   fabric, if is True, otherwise it must expects the
+                                   cookies to be coming from the master session
         """
         if not isinstance(url, basestring): url = str(url)
         if not isinstance(uid, basestring): uid = str(uid)
@@ -140,7 +145,19 @@ class Session(object):
                 raise TypeError("Could not load private key(%s): %s" % (self.key, e))
 
         self.verify_ssl = verify_ssl
+        self._masterSession = masterSession
+        self._sessionFile = "/tmp/{}_ACISession.pickle".format(self.hostname)
         self.session = None
+        logger.info("MasterSession: {}".format(self._masterSession))
+        if self._masterSession:
+            # Star ta fresh session
+            if os.path.exists(self._sessionFile):
+                os.unlink(self._sessionFile)
+            self.session = requests.Session()
+        else:
+            logger.debug("Read the session from file: {}".format(self._sessionFile))
+            with open(self._sessionFile, "rb") as sharedSessionF:
+                self.session = pickle.load(sharedSessionF)
         self.token = None
         self.login_timeout = 0
         self.login_lifetime = 0
@@ -168,8 +185,6 @@ class Session(object):
         # no need to build x509 header since authentication is using token
         if self.appcenter_user and self._logged_in:
             return {}
-        if not self.session:
-            self.session = requests.Session()
         if self.appcenter_user:
             cert_dn = 'uni/userext/appuser-{0}/usercert-{1}'.format(self.uid, self.cert_name)
         else:
@@ -195,7 +210,6 @@ class Session(object):
         """ send the actual login request to the APIC and open the web socket interface. """
 
         self._logged_in = False
-        self.session = requests.Session()
 
         if self.appcenter_user:
             login_url = '/api/requestAppToken.json'
@@ -333,6 +347,18 @@ class Session(object):
         if self.session is not None:
             self.session.close()
 
+    def _full_stack(self):
+        exc = sys.exc_info()[0]
+        stack = traceback.extract_stack()[:-1]  # last one would be full_stack()
+        if exc is not None:  # i.e. an exception is present
+            del stack[-1]       # remove call of full_stack, the printed exception
+                                # will contain the caught exception caller instead
+        trc = 'Traceback (most recent call last):\n'
+        stackstr = trc + ''.join(traceback.format_list(stack))
+        if exc is not None:
+            stackstr += '  ' + traceback.format_exc().lstrip(trc)
+        return stackstr
+
     def _send(self, method, url, data=None, timeout=None, retry=True):
         """ perform GET/POST/DELETE request to apic
             returns requests response object
@@ -393,6 +419,12 @@ class Login(threading.Thread):
         threading.Thread.__init__(self)
         self.failure_reason = None
         self._session = session
+        self._cached_stamp = None
+        # If we reached this point it means we already logged in, hence we have to dump the session
+        # in case we are the masterSession
+        if self._session._masterSession:
+            with open(self._session._sessionFile, "wb") as sharedSessionF:
+                pickle.dump(self._session.session, sharedSessionF)
         self._exit = False
 
     def exit(self):
@@ -458,28 +490,45 @@ class Login(threading.Thread):
                 return False
 
     def run(self):
-        threading.currentThread().name = "session-login"
-        logger.debug("starting new login thread")
-        self.failure_reason = None
-        while not self._exit:
-            self.wait_until_next_cycle()
-            try:
-                # trigger either token refresh or graceful_resubscribe
-                if self._session.graceful and time.time() > self._session.login_lifetime:
-                    success = self.restart()
-                else:
-                    success = self.refresh()
-                if not success:
-                    logger.warn("failed to refresh/restart login thread")
+        threading.current_thread().name = "session-login-slave"
+        if self._session._masterSession:
+            threading.current_thread().name = "session-login-master"
+            logger.info("Starting a master login thread")
+        else:
+            logger.info("Starting a slave login thread")
+        if self._session._masterSession:
+            self.failure_reason = None
+            while not self._exit:
+                self.wait_until_next_cycle()
+                try:
+                    # trigger either token refresh or graceful_resubscribe
+                    if self._session.graceful and time.time() > self._session.login_lifetime:
+                        success = self.restart()
+                    else:
+                        success = self.refresh()
+                    if not success:
+                        logger.warn("failed to refresh/restart login thread")
+                        return self.exit()
+                    logger.debug("Dump the session on file: {}".format(self._session._sessionFile))
+                    with open(self._session._sessionFile, "wb") as sharedSessionF:
+                        pickle.dump(self._session.session, sharedSessionF)
+                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                    logger.warn('connection error or timeout on login refresh/restart')
                     return self.exit()
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-                logger.warn('connection error or timeout on login refresh/restart')
-                return self.exit()
-            except Exception as e:
-                logger.debug("Traceback:\n%s", traceback.format_exc())
-                logger.warn("exception occurred on login thread login: %s", e)
-                return self.exit()
-
+                except Exception as e:
+                    logger.debug("Traceback:\n%s", traceback.format_exc())
+                    logger.warn("exception occurred on login thread login: %s", e)
+                    return self.exit()
+        else:
+            # On a slave session we keep reading the cookies if they have changed
+            while not self._exit:
+                time.sleep(1)
+                stamp = os.stat(self._session._sessionFile).st_mtime
+                if stamp != self._cached_stamp:
+                    self._cached_stamp = stamp
+                    logger.debug("Read the session from file: {}".format(self._session._sessionFile))
+                    with open(self._session._sessionFile, "rb") as sharedSessionF:
+                        self._session.session = pickle.load(sharedSessionF)
         return self.exit()
 
 class EventHandler(threading.Thread):
@@ -971,4 +1020,3 @@ class Subscriber(threading.Thread):
                 if ws is not None and ws.connected:
                     logger.debug("closing connected web socket")
                     ws.close()
-
