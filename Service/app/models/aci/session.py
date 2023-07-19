@@ -717,7 +717,7 @@ class Subscriber(threading.Thread):
         refresh = ""
         if self._session.subscription_refresh_time > Session.DEFAULT_SUBSCRIPTION_REFRESH:
             refresh = "&refresh-timeout=%s" % (
-                    self._session.subscription_refresh_time + Session.MIN_SUBSCRIPTION_REFRESH)
+                self._session.subscription_refresh_time + self._session.subscription_refresh_time // 2)
         for _id in subscriptions:
             refreshed = False
             try:
@@ -813,7 +813,7 @@ class Subscriber(threading.Thread):
             refresh = ""
             if self._session.subscription_refresh_time > Session.DEFAULT_SUBSCRIPTION_REFRESH:
                 refresh = "refresh-timeout=%s" % (
-                    self._session.subscription_refresh_time + Session.MIN_SUBSCRIPTION_REFRESH)
+                    self._session.subscription_refresh_time + self._session.subscription_refresh_time // 2)
                 if "?" in url:
                     url = "%s&%s" % (url, refresh)
                 else:
